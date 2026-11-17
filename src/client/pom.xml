@@ -1,5 +1,3 @@
-<!-- cara q desgraça -->
-
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -17,11 +15,13 @@
   </properties>
 
   <dependencies>
+    <!-- ZeroMQ em Java puro (não exige instalar libzmq no sistema) -->
     <dependency>
       <groupId>org.zeromq</groupId>
       <artifactId>jeromq</artifactId>
       <version>0.6.0</version>
     </dependency>
+    <!-- Runtime do Protocol Buffers -->
     <dependency>
       <groupId>com.google.protobuf</groupId>
       <artifactId>protobuf-java</artifactId>
@@ -34,6 +34,7 @@
     <finalName>bot</finalName>
 
     <extensions>
+      <!-- Detecta SO/arquitetura para baixar o binário certo do protoc -->
       <extension>
         <groupId>kr.motd.maven</groupId>
         <artifactId>os-maven-plugin</artifactId>
@@ -42,7 +43,7 @@
     </extensions>
 
     <plugins>
-      <!-- gera as classes java com o ../proto/bbs.proto -->
+      <!-- Gera as classes Java a partir de ../proto/bbs.proto (o MESMO arquivo do servidor) -->
       <plugin>
         <groupId>org.xolstice.maven.plugins</groupId>
         <artifactId>protobuf-maven-plugin</artifactId>
@@ -58,7 +59,7 @@
         </executions>
       </plugin>
 
-      <!-- empacota tudo -->
+      <!-- Empacota tudo em um "fat jar" executável com java -jar -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>

@@ -1,0 +1,59 @@
+# Orquestração do BBS - Partes 1 e 2.
+#   docker compose up --build                       -> broker + proxy + 1 servidor + 3 bots
+#   docker compose --profile multi up --build       -> adiciona o server2
+services:
+
+  # Intermediário REQ/REP (ROUTER/DEALER). Único endereço que os clientes usam para pedidos.
+  broker:
+    build: { context: ., dockerfile: broker/Dockerfile }
+
+  # Proxy Pub/Sub (XSUB :5557 para publicadores, XPUB :5558 para assinantes).
+  proxy:
+    build: { context: ., dockerfile: proxy/Dockerfile }
+
+  # Servidor 1 - banco SQLite próprio, em volume próprio.
+  server1:
+    build: { context: ., dockerfile: server/Dockerfile }
+    environment:
+      SERVER_NAME: server1
+      BROKER_ADDR: tcp://broker:5556
+      PUB_ADDR: tcp://proxy:5557
+      DB_PATH: /data/server.db
+    volumes:
+      - server1_data:/data
+    depends_on: [broker, proxy]
+
+  # Servidor 2 - só sobe com --profile multi.
+  # ATENÇÃO: os bancos NÃO são replicados; com 2 servidores o broker alterna
+  # as requisições e cada um enxerga apenas os seus canais/mensagens.
+  # A sincronização entre servidores fica para as próximas partes.
+  server2:
+    profiles: ["multi"]
+    build: { context: ., dockerfile: server/Dockerfile }
+    environment:
+      SERVER_NAME: server2
+      BROKER_ADDR: tcp://broker:5556
+      PUB_ADDR: tcp://proxy:5557
+      DB_PATH: /data/server.db
+    volumes:
+      - server2_data:/data
+    depends_on: [broker, proxy]
+
+  # Bots (clientes Java). 3 réplicas, cada uma com nome aleatório diferente.
+  # Comportamento padronizado: 5 canais, 3 inscrições, rajadas de 10 mensagens (1/s).
+  client:
+    build: { context: ., dockerfile: client/Dockerfile }
+    environment:
+      BROKER_ADDR: tcp://broker:5555
+      SUB_ADDR: tcp://proxy:5558
+      MIN_CHANNELS: "5"
+      MIN_SUBSCRIPTIONS: "3"
+      BURST_SIZE: "10"
+      MESSAGE_INTERVAL_MS: "1000"
+    deploy:
+      replicas: 3
+    depends_on: [broker, proxy, server1]
+
+volumes:
+  server1_data:
+  server2_data:
