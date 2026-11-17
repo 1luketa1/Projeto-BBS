@@ -52,7 +52,7 @@ class Database:
                    )"""
             )
 
-    # ---- logins -------------------------------------------------------
+    # --- logins ---
     def register_login(self, username: str, timestamp: int) -> None:
         """Guarda o login (mesmo usuário pode aparecer várias vezes)."""
         with self.conn:
@@ -61,7 +61,7 @@ class Database:
                 (username, timestamp),
             )
 
-    # ---- canais -------------------------------------------------------
+    # --- canais ---
     def create_channel(self, name: str, created_by: str, timestamp: int) -> bool:
         """Cria o canal. Retorna False se já existir um com esse nome."""
         try:

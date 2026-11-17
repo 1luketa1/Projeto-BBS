@@ -20,37 +20,24 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Queue;
 import java.util.Random;
+import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.stream.Collectors;
 
 /**
  * Bot (cliente) do BBS - Partes 1 e 2.
  *
- * Dois sockets, cada um com sua função:
- *   REQ -> broker (:5555): login, criar/listar canais e pedir publicação.
- *   SUB -> proxy  (:5558): recebe as mensagens dos canais em que está inscrito.
+ *
+ *   broker (port 5555): login, criar/listar canais e pedir publicação
+ *   proxy  (port 5558): recebe as mensagens dos canais em que está inscrito
  *
  * Comportamento padronizado pela especificação (sem nenhuma interação humana):
- *   1. Se existirem menos de 5 canais, cria um novo.
- *   2. Se estiver inscrito em menos de 3 canais, inscreve-se em mais um (aleatório).
+ *   1. Se existirem menos de 5 canais, cria um novo
+ *   2. Se estiver inscrito em menos de 3 canais, inscreve-se em mais um (aleatório)
  *   3. Loop infinito: escolhe um canal da lista e publica 10 mensagens
- *      aleatórias, com 1 segundo de intervalo entre elas.
- *
- * NOTA: os passos 1 e 2 são reavaliados a cada volta do loop. Assim o bot
- * converge para 5 canais / 3 inscrições mesmo começando do zero.
- * Para executá-los só uma vez, mova as duas chamadas para antes do while em run().
- *
- * Por que uma thread separada para o SUB? Receber é bloqueante e as mensagens
- * chegam a qualquer momento, inclusive enquanto o bot está dormindo entre
- * publicações. Sockets ZeroMQ não são thread-safe: o socket SUB é criado e usado
- * SÓ pela thread assinante; a thread principal pede novas inscrições por uma fila.
- *
- * Variáveis de ambiente: BROKER_ADDR, SUB_ADDR, BOT_NAME, MIN_CHANNELS (5),
- * MIN_SUBSCRIPTIONS (3), BURST_SIZE (10), MESSAGE_INTERVAL_MS (1000).
+ *      aleatórias, com 1 segundo de intervalo entre elas
+ * variáveis de ambiente: BROKER_ADDR, SUB_ADDR, BOT_NAME, MIN_CHANNELS (5), MIN_SUBSCRIPTIONS (3), BURST_SIZE (10), MESSAGE_INTERVAL_MS (1000)
  */
 public class Bot implements AutoCloseable {
 
@@ -58,14 +45,14 @@ public class Bot implements AutoCloseable {
     private static final int MAX_RETRIES = 5;     // tentativas por requisição
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
-    // Nomes candidatos para canais novos.
+    // nomes para canais novos
     private static final List<String> CHANNEL_POOL =
             List.of("geral", "random", "tecnologia", "jogos", "musica", "filmes");
-    // Frases para as mensagens aleatórias.
+    // frases para as mensagens aleatórias
     private static final List<String> PHRASES = List.of(
-            "Alguém por aqui?", "Bom dia, pessoal!", "Qual a novidade?", "Testando o canal",
-            "Esse BBS é nostálgico", "Quem aí lembra do modem 56k?", "Mensagem de teste",
-            "Boa tarde a todos", "Ping!", "Vamos conversar?");
+            "Alguém por aqui?", "Bom dia", "@everyone", "testeeeeee",
+            "Esse BBS é nostálgico!", "Quem aí lembra do modem 56k?", "Mensagem de teste",
+            "Boa tarde a todos", "Ping!");
 
     private final String brokerAddr;
     private final String subAddr;
@@ -76,14 +63,10 @@ public class Bot implements AutoCloseable {
     private final Random random = new Random();
 
     private final ZContext ctx = new ZContext();
-    private ZMQ.Socket socket;                  // REQ (usado só pela thread principal)
-    private volatile String username;           // lido também pela thread assinante (logs)
-
-    // Estado compartilhado entre a thread principal e a thread assinante.
-    private final Set<String> subscriptions = ConcurrentHashMap.newKeySet();
-    private final Queue<String> pendingSubscribes = new ConcurrentLinkedQueue<>();
-    private volatile boolean running = true;
-    private Thread subscriberThread;
+    private ZMQ.Socket socket;                  // REQ pedidos ao servidor (via broker)
+    private final ZMQ.Socket sub;               // SUB publicações dos canais (via proxy)
+    private String username;
+    private final Set<String> subscriptions = new HashSet<>();   // canais em que estamos inscritos
 
     public Bot() {
         this.brokerAddr = env("BROKER_ADDR", "tcp://broker:5555");
@@ -94,6 +77,9 @@ public class Bot implements AutoCloseable {
         this.burstSize = Integer.parseInt(env("BURST_SIZE", "10"));
         this.messageIntervalMs = Long.parseLong(env("MESSAGE_INTERVAL_MS", "1000"));
         connect();
+
+        sub = ctx.createSocket(SocketType.SUB);
+        sub.connect(subAddr);   // as inscrições (subscribe) são feitas depois, canal a canal
     }
 
     private static String env(String name, String fallback) {
@@ -104,7 +90,7 @@ public class Bot implements AutoCloseable {
     // Rede REQ/REP
     // ------------------------------------------------------------------
 
-    /** (Re)cria o socket REQ. Necessário após timeout: um REQ que perdeu a resposta fica "travado". */
+    /** recria o socket REQ, que é preciso dps de um timeout **/
     private void connect() {
         if (socket != null) {
             ctx.destroySocket(socket);
@@ -116,10 +102,8 @@ public class Bot implements AutoCloseable {
     }
 
     /**
-     * Envia o Envelope e devolve a resposta. Se o servidor não responder a
-     * tempo (ex.: ainda subindo), recria o socket e tenta de novo.
-     * ATENÇÃO: um reenvio após timeout pode duplicar uma publicação se o
-     * servidor chegou a processar o pedido original (aceitável nesta parte).
+     * envia o envelope e devolve a resposta. se o servidor não responder a tempo, recria o socket e tenta de novo
+     * como o servidor trata login e criação de canal de forma segura para repetição, reenviar não causa dano
      */
     private Envelope request(Envelope req) {
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -142,7 +126,7 @@ public class Bot implements AutoCloseable {
         throw new IllegalStateException("servidor indisponível");
     }
 
-    /** Cria um Envelope já com o timestamp do envio (campo obrigatório). */
+    /** timestamp do envio */
     private static Envelope.Builder envelope() {
         return Envelope.newBuilder().setTimestamp(System.currentTimeMillis());
     }
@@ -166,11 +150,8 @@ public class Bot implements AutoCloseable {
     }
 
     /**
-     * Lista TODOS os campos da mensagem como chave=valor, inclusive os de valor
-     * padrão (ex.: status=OK, que o formato texto do protobuf omitiria).
-     * Strings vazias (ex.: error sem erro) são omitidas. Usa os descritores,
-     * então funciona para qualquer mensagem nova adicionada ao .proto.
-     */
+     * Lista TODOS os campos da mensagem como chave=valor, inclusive os de valor padrão
+     * Ignora strings vazias, par isso, usamos os descritores, então funciona para qualquer mensagem nova adicionada ao .proto */
     private static String describeBody(Envelope env) {
         Descriptors.FieldDescriptor active = activeField(env);
         if (active == null) {
@@ -193,11 +174,6 @@ public class Bot implements AutoCloseable {
         return String.join(" ", parts);
     }
 
-    /**
-     * Exibe cada mensagem enviada/recebida com todo o conteúdo (exigência da spec):
-     *   HH:MM:SS.mmm | origem | SEND/RECV | tipo | campos...  ts=<hora do envio>
-     * "suffix" permite acrescentar informação extra (ex.: hora do recebimento).
-     */
     private void log(String direction, Envelope env, String suffix) {
         Descriptors.FieldDescriptor active = activeField(env);
         String kind = active == null ? "(vazio)" : active.getName();
@@ -220,7 +196,7 @@ public class Bot implements AutoCloseable {
     // Operações do protocolo (REQ/REP)
     // ------------------------------------------------------------------
 
-    /** Login: uma mensagem de ida, uma de volta. Se der erro, repete com outro nome. */
+    /** uma mensagem de ida e recebe uma de volta */
     public void login() throws InterruptedException {
         String baseName = username;
         while (true) {
@@ -232,13 +208,13 @@ public class Bot implements AutoCloseable {
                     && rep.getLoginRep().getStatus() == Status.OK) {
                 return;
             }
-            // Erro: tenta de novo com um sufixo aleatório.
+            // caso de erro ele tenta de novo com um nome aleatório
             username = baseName + "-" + Integer.toHexString(random.nextInt(0xFFFF));
             Thread.sleep(2000);
         }
     }
 
-    /** Pede ao servidor a lista com o nome de todos os canais existentes. */
+    /** pede ao servidor a lista com o nome de todos os canais */
     public List<String> listChannels() {
         Envelope rep = request(envelope()
                 .setListChannelsReq(ListChannelsRequest.getDefaultInstance())
@@ -246,7 +222,7 @@ public class Bot implements AutoCloseable {
         return new ArrayList<>(rep.getListChannelsRep().getChannelsList());
     }
 
-    /** Pede a criação de um canal. Retorna true se o servidor respondeu OK. */
+    /** pede a criação de um canal, retorna true se o servidor respondeu ok */
     public boolean createChannel(String channel) {
         Envelope rep = request(envelope()
                 .setCreateChannelReq(CreateChannelRequest.newBuilder()
@@ -257,7 +233,7 @@ public class Bot implements AutoCloseable {
                 && rep.getCreateChannelRep().getStatus() == Status.OK;
     }
 
-    /** Pede ao servidor para publicar um texto em um canal. Retorna true se OK. */
+    /** publicação de texto em canais */
     public boolean publish(String channel, String text) {
         Envelope rep = request(envelope()
                 .setPublishReq(PublishRequest.newBuilder()
@@ -270,50 +246,34 @@ public class Bot implements AutoCloseable {
     }
 
     // ------------------------------------------------------------------
-    // Assinatura de canais (SUB) - roda em thread própria
+    // Assinatura de canais (SUB)
     // ------------------------------------------------------------------
 
-    /** Inscreve-se em um canal. A inscrição de fato é feita pela thread assinante. */
+    /** Inscreve-se em um canal, todas as inscrições usam a mesma conexão */
     private void subscribe(String channel) {
         if (subscriptions.add(channel)) {
-            pendingSubscribes.add(channel);
+            sub.subscribe(channel.getBytes(StandardCharsets.UTF_8));
             note("inscrito no canal '" + channel + "' (" + subscriptions.size() + " inscrição(ões))");
         }
     }
 
-    private void startSubscriber() {
-        subscriberThread = new Thread(this::subscriberLoop, "subscriber");
-        subscriberThread.setDaemon(true);
-        subscriberThread.start();
+    private void pause(long ms) {
+        long deadline = System.currentTimeMillis() + ms;
+        long remaining;
+        while ((remaining = deadline - System.currentTimeMillis()) > 0) {
+            sub.setReceiveTimeOut((int) remaining);
+            receiveOne();
+        }
     }
 
-    private void subscriberLoop() {
-        // Este socket pertence exclusivamente a esta thread.
-        ZMQ.Socket sub = ctx.createSocket(SocketType.SUB);
-        sub.setReceiveTimeOut(200);          // acorda a cada 200 ms para ver novas inscrições
-        sub.connect(subAddr);
-
-        try {
-            while (running) {
-                // 1) aplica as inscrições pedidas pela thread principal (todas na MESMA conexão)
-                String channel;
-                while ((channel = pendingSubscribes.poll()) != null) {
-                    sub.subscribe(channel.getBytes(StandardCharsets.UTF_8));
-                }
-
-                // 2) recebe uma publicação: frame 1 = tópico, frame 2 = Envelope
-                String topic = sub.recvStr();
-                if (topic == null || !sub.hasReceiveMore()) {
-                    continue;                // timeout (nada chegou) ou mensagem malformada
-                }
-                byte[] payload = sub.recv(0);
-                handlePublication(topic, payload);
-            }
-        } catch (RuntimeException e) {
-            if (running) {
-                note("thread assinante encerrada por erro: " + e);
-            }
+    /** recebe e exibe) uma publicação, se chegar antes do timeout configurado no socket */
+    private void receiveOne() {
+        String topic = sub.recvStr();                      // frame 1: tópico (null = timeout)
+        if (topic == null || !sub.hasReceiveMore()) {
+            return;
         }
+        byte[] payload = sub.recv(0);                      // frame 2: Envelope serializado
+        handlePublication(topic, payload);
     }
 
     private void handlePublication(String topic, byte[] payload) {
@@ -323,12 +283,10 @@ public class Bot implements AutoCloseable {
                 return;
             }
             String channel = env.getChannelMsg().getChannel();
-            // O filtro do ZeroMQ casa por PREFIXO: quem assinou "geral" também receberia
-            // "geral2". Por isso conferimos o nome exato do canal.
             if (!topic.equals(channel) || !subscriptions.contains(channel)) {
                 return;
             }
-            // Exibe canal, mensagem, timestamp do envio (ts=) e do recebimento (received=).
+            // Exibe canal, mensagem, timestamp do envio (ts=) e do recebimento (received=)
             log("RECV", env, "  received=" + LocalTime.now().format(CLOCK));
         } catch (InvalidProtocolBufferException e) {
             note("publicação inválida ignorada no tópico '" + topic + "'");
@@ -339,7 +297,7 @@ public class Bot implements AutoCloseable {
     // Comportamento do bot
     // ------------------------------------------------------------------
 
-    /** Passo 1: se há menos de minChannels canais, cria um com nome ainda livre. */
+    /**  se há menos de minChannels canais, cria um com nome ainda livre */
     private void ensureChannels(List<String> existing) {
         if (existing.size() >= minChannels) {
             return;
@@ -349,10 +307,10 @@ public class Bot implements AutoCloseable {
         String name = candidates.isEmpty()
                 ? "canal-" + Integer.toHexString(random.nextInt(0xFFFFF))
                 : candidates.get(random.nextInt(candidates.size()));
-        createChannel(name);   // se outro bot criou antes, o servidor responde "já existe": sem problema
+        createChannel(name);   // se outro bot criou antes, o servidor responde "já existe"
     }
 
-    /** Passo 2: se está inscrito em menos de minSubscriptions canais, inscreve-se em mais um aleatório. */
+    /** se está inscrito em menos de minSubscriptions canais, inscreve-se em mais um aleatório */
     private void ensureSubscriptions(List<String> channels) {
         if (subscriptions.size() >= minSubscriptions) {
             return;
@@ -370,43 +328,34 @@ public class Bot implements AutoCloseable {
 
     public void run() throws InterruptedException {
         login();
-        startSubscriber();
 
         while (true) {
             List<String> channels = listChannels();
             if (channels.size() < minChannels) {
                 ensureChannels(channels);
-                channels = listChannels();   // atualiza a lista com o canal recém-criado
+                channels = listChannels();   // atualiza a lista com o canal recém criado
             }
             ensureSubscriptions(channels);
 
             if (channels.isEmpty()) {
-                Thread.sleep(1000);
+                pause(1000);
                 continue;
             }
 
-            // Passos 4 e 5: escolhe um canal e envia burstSize mensagens, 1 por segundo.
+            // escolhe um canal e envia burstSize mensagens, 1 por segundo
             String target = channels.get(random.nextInt(channels.size()));
             for (int i = 0; i < burstSize; i++) {
                 if (!publish(target, randomText())) {
                     note("publicação em '" + target + "' falhou");
                 }
-                Thread.sleep(messageIntervalMs);
+                pause(messageIntervalMs);   // espera 1 seg ainda recebendo publicações
             }
         }
     }
 
     @Override
     public void close() {
-        running = false;
-        if (subscriberThread != null) {
-            try {
-                subscriberThread.join(1000);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
-        }
-        ctx.close();
+        ctx.close();   // fecha todos os sockets criados por este contexto
     }
 
     // ------------------------------------------------------------------
