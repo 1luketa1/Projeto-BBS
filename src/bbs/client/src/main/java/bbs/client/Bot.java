@@ -25,34 +25,20 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/**
- * Bot (cliente) do BBS - Partes 1 e 2.
- *
- *
- *   broker (port 5555): login, criar/listar canais e pedir publicação
- *   proxy  (port 5558): recebe as mensagens dos canais em que está inscrito
- *
- * Comportamento padronizado pela especificação (sem nenhuma interação humana):
- *   1. Se existirem menos de 5 canais, cria um novo
- *   2. Se estiver inscrito em menos de 3 canais, inscreve-se em mais um (aleatório)
- *   3. Loop infinito: escolhe um canal da lista e publica 10 mensagens
- *      aleatórias, com 1 segundo de intervalo entre elas
- * variáveis de ambiente: BROKER_ADDR, SUB_ADDR, BOT_NAME, MIN_CHANNELS (5), MIN_SUBSCRIPTIONS (3), BURST_SIZE (10), MESSAGE_INTERVAL_MS (1000)
- */
 public class Bot implements AutoCloseable {
 
     private static final int TIMEOUT_MS = 5000;   // espera máxima por uma resposta
     private static final int MAX_RETRIES = 5;     // tentativas por requisição
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
-    // nomes para canais novos
+    // Nomes candidatos para canais novos.
     private static final List<String> CHANNEL_POOL =
             List.of("geral", "random", "tecnologia", "jogos", "musica", "filmes");
-    // frases para as mensagens aleatórias
+    // Frases para as mensagens aleatórias.
     private static final List<String> PHRASES = List.of(
-            "Alguém por aqui?", "Bom dia", "@everyone", "testeeeeee",
-            "Esse BBS é nostálgico!", "Quem aí lembra do modem 56k?", "Mensagem de teste",
-            "Boa tarde a todos", "Ping!");
+            "Alguém por aqui?", "Bom dia, pessoal!", "Qual a novidade?", "Testando o canal",
+            "Esse BBS é nostálgico", "Quem aí lembra do modem 56k?", "Mensagem de teste",
+            "Boa tarde a todos", "Ping!", "Vamos conversar?");
 
     private final String brokerAddr;
     private final String subAddr;
@@ -63,9 +49,10 @@ public class Bot implements AutoCloseable {
     private final Random random = new Random();
 
     private final ZContext ctx = new ZContext();
-    private ZMQ.Socket socket;                  // REQ pedidos ao servidor (via broker)
-    private final ZMQ.Socket sub;               // SUB publicações dos canais (via proxy)
+    private ZMQ.Socket socket;                  // pedidos ao servidor (via broker)
+    private final ZMQ.Socket sub;               // publicações dos canais (via proxy)
     private String username;
+    private long logicalClock = 0;               // relógio lógico
     private final Set<String> subscriptions = new HashSet<>();   // canais em que estamos inscritos
 
     public Bot() {
@@ -79,7 +66,7 @@ public class Bot implements AutoCloseable {
         connect();
 
         sub = ctx.createSocket(SocketType.SUB);
-        sub.connect(subAddr);   // as inscrições (subscribe) são feitas depois, canal a canal
+        sub.connect(subAddr);   // as inscrições são feitas depois, canal a canal
     }
 
     private static String env(String name, String fallback) {
@@ -107,14 +94,20 @@ public class Bot implements AutoCloseable {
      */
     private Envelope request(Envelope req) {
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            log("SEND", req);
-            socket.send(req.toByteArray(), 0);
+            // Carimba NO MOMENTO DO ENVIO: hora e relógio lógico incrementado antes de enviar.
+            Envelope msg = req.toBuilder()
+                    .setTimestamp(System.currentTimeMillis())
+                    .setLogicalClock(++logicalClock)
+                    .build();
+            log("SEND", msg);
+            socket.send(msg.toByteArray(), 0);
             byte[] data = socket.recv(0);    // null em caso de timeout
 
             if (data != null) {
                 try {
                     Envelope rep = Envelope.parseFrom(data);
-                    log("RECV", rep);
+                    observeClock(rep.getLogicalClock());   // máximo entre o recebido e o atual
+                    log("RECV", rep, "  local_lc=" + logicalClock);
                     return rep;
                 } catch (InvalidProtocolBufferException e) {
                     throw new IllegalStateException("resposta inválida do servidor", e);
@@ -126,9 +119,14 @@ public class Bot implements AutoCloseable {
         throw new IllegalStateException("servidor indisponível");
     }
 
-    /** timestamp do envio */
+    /** Cria o Envelope, timestamp e relógio lógico são preenchidos em request(), no momento do envio */
     private static Envelope.Builder envelope() {
-        return Envelope.newBuilder().setTimestamp(System.currentTimeMillis());
+        return Envelope.newBuilder();
+    }
+
+    /** Regra 2 de Lamport: novo valor = máximo entre o recebido na mensagem e o atual */
+    private void observeClock(long received) {
+        logicalClock = Math.max(logicalClock, received);
     }
 
     // ------------------------------------------------------------------
@@ -139,7 +137,7 @@ public class Bot implements AutoCloseable {
         return LocalTime.ofInstant(Instant.ofEpochMilli(epochMillis), ZoneId.systemDefault()).format(CLOCK);
     }
 
-    /** Valor legível de um campo (enum vira o nome, ex.: OK). */
+    /** Valor legível de um campo (enum vira o nome, ex.: OK) */
     private static String fmt(Object value) {
         return value instanceof Descriptors.EnumValueDescriptor e ? e.getName() : value.toString();
     }
@@ -178,7 +176,8 @@ public class Bot implements AutoCloseable {
         Descriptors.FieldDescriptor active = activeField(env);
         String kind = active == null ? "(vazio)" : active.getName();
         String body = describeBody(env);
-        String content = (body.isEmpty() ? "" : body + "  ") + "ts=" + clock(env.getTimestamp()) + suffix;
+        String content = (body.isEmpty() ? "" : body + "  ") + "ts=" + clock(env.getTimestamp())
+                + "  lc=" + env.getLogicalClock() + suffix;
         System.out.printf("%s | %-10s | %-4s | %-19s | %s%n",
                 LocalTime.now().format(CLOCK), username, direction, kind, content);
     }
@@ -208,7 +207,7 @@ public class Bot implements AutoCloseable {
                     && rep.getLoginRep().getStatus() == Status.OK) {
                 return;
             }
-            // caso de erro ele tenta de novo com um nome aleatório
+            // Erro: tenta de novo com um sufixo aleatório.
             username = baseName + "-" + Integer.toHexString(random.nextInt(0xFFFF));
             Thread.sleep(2000);
         }
@@ -286,8 +285,10 @@ public class Bot implements AutoCloseable {
             if (!topic.equals(channel) || !subscriptions.contains(channel)) {
                 return;
             }
-            // Exibe canal, mensagem, timestamp do envio (ts=) e do recebimento (received=)
-            log("RECV", env, "  received=" + LocalTime.now().format(CLOCK));
+            observeClock(env.getLogicalClock());
+            // Exibe canal, mensagem, timestamp do envio (ts=), relógio lógico de quem enviou (lc=),
+            // hora do recebimento (received=) e o relógio lógico local após a atualização (local_lc=).
+            log("RECV", env, "  received=" + LocalTime.now().format(CLOCK) + "  local_lc=" + logicalClock);
         } catch (InvalidProtocolBufferException e) {
             note("publicação inválida ignorada no tópico '" + topic + "'");
         }
@@ -310,7 +311,7 @@ public class Bot implements AutoCloseable {
         createChannel(name);   // se outro bot criou antes, o servidor responde "já existe"
     }
 
-    /** se está inscrito em menos de minSubscriptions canais, inscreve-se em mais um aleatório */
+    /**se está inscrito em menos de minSubscriptions canais, inscreve-se em mais um aleatório */
     private void ensureSubscriptions(List<String> channels) {
         if (subscriptions.size() >= minSubscriptions) {
             return;
@@ -342,13 +343,13 @@ public class Bot implements AutoCloseable {
                 continue;
             }
 
-            // escolhe um canal e envia burstSize mensagens, 1 por segundo
+            // escolhe um canal e envia burstSize mensagens
             String target = channels.get(random.nextInt(channels.size()));
             for (int i = 0; i < burstSize; i++) {
                 if (!publish(target, randomText())) {
                     note("publicação em '" + target + "' falhou");
                 }
-                pause(messageIntervalMs);   // espera 1 seg ainda recebendo publicações
+                pause(messageIntervalMs);   // espera 1 s ainda recebendo publicações
             }
         }
     }

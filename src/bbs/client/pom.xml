@@ -43,7 +43,7 @@
     </extensions>
 
     <plugins>
-      <!-- gera as classes java com o ../proto/bbs.proto -->
+      <!-- Gera as classes java a partir de ../proto/bbs.proto -->
       <plugin>
         <groupId>org.xolstice.maven.plugins</groupId>
         <artifactId>protobuf-maven-plugin</artifactId>

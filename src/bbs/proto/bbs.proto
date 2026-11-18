@@ -6,7 +6,7 @@ package bbs;
 option java_package = "bbs.proto";
 option java_multiple_files = true;
 
-// Resultado padrão de uma operação (usado nas respostas).
+// Resultado padrão de uma operação
 enum Status {
   OK = 0;
   ERROR = 1;
@@ -14,6 +14,7 @@ enum Status {
 
 message Envelope {
   int64 timestamp = 1;  // OBRIGATÓRIO: epoch em milissegundos do momento do envio
+  int64 logical_clock = 2;  // Parte 3: contador (relógio lógico de Lamport) de quem ENVIA
 
   oneof body {
     LoginRequest         login_req          = 10;
@@ -23,9 +24,15 @@ message Envelope {
     ListChannelsRequest  list_channels_req  = 14;
     ListChannelsReply    list_channels_rep  = 15;
     ErrorReply           error_rep          = 16;  // resposta genérica (mensagem inválida)
-    PublishRequest       publish_req        = 17;  // bot pede ao servidor para publicar
-    PublishReply         publish_rep        = 18;  // status da publicação
-    ChannelMessage       channel_msg        = 19;  // o que o servidor publica no tópico
+    PublishRequest       publish_req        = 17;  // Parte 2: bot pede ao servidor para publicar
+    PublishReply         publish_rep        = 18;  // Parte 2: status da publicação
+    ChannelMessage       channel_msg        = 19;  // Parte 2: o que o servidor publica no tópico
+    RankRequest          rank_req           = 20;  // Parte 3: servidor -> referência
+    RankReply            rank_rep           = 21;
+    ListServersRequest   list_servers_req   = 22;
+    ListServersReply     list_servers_rep   = 23;
+    HeartbeatRequest     heartbeat_req      = 24;
+    HeartbeatReply       heartbeat_rep      = 25;
   }
 }
 
@@ -50,7 +57,7 @@ message CreateChannelReply {
 message ListChannelsRequest {}
 message ListChannelsReply { repeated string channels = 1; }
 
-// --- Erro genérico (ex.: servidor recebeu bytes que não são um Envelope)
+// --- Erro genérico ---
 message ErrorReply { string error = 1; }
 
 // req de publicação
@@ -71,4 +78,25 @@ message ChannelMessage {
   string channel  = 1;
   string username = 2;
   string text     = 3;
+}
+
+message RankRequest { string name = 1; }
+message RankReply {
+  Status status = 1;
+  int32  rank   = 2;
+  string error  = 3;
+}
+
+message ServerInfo {
+  string name = 1;
+  int32  rank = 2;
+}
+message ListServersRequest {}
+message ListServersReply { repeated ServerInfo servers = 1; }
+
+message HeartbeatRequest { string name = 1; }
+message HeartbeatReply {
+  Status status         = 1;  // erro se o servidor não estiver cadastrado
+  int64  reference_time = 2;  // hora da referência
+  string error          = 3;
 }

@@ -6,5 +6,6 @@ RUN pip install --no-cache-dir pyzmq protobuf grpcio-tools
 COPY proto/ proto/
 RUN python -m grpc_tools.protoc -I proto --python_out=. proto/bbs.proto
 
+COPY common/bbsutil.py .
 COPY server/ .
 CMD ["python", "-u", "server.py"]

@@ -21,7 +21,7 @@ def main():
     print(f"[proxy] publicadores (XSUB) em :{XSUB_PORT} | assinantes (XPUB) em :{XPUB_PORT}", flush=True)
 
     try:
-        zmq.proxy(xsub, xpub)   # loop infinito: mensagens xsub->xpub, inscrições xpub->xsub
+        zmq.proxy(xsub, xpub)   # loop infinito de mensagens xsub->xpub, inscrições xpub->xsub
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:

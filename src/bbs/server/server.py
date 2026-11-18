@@ -2,84 +2,51 @@ import os
 import re
 import signal
 import sys
-import time
-from datetime import datetime
 
 import zmq
 from google.protobuf.message import DecodeError
 
 import bbs_pb2  # gerado a partir de proto/bbs.proto durante o build da imagem
+from bbsutil import LogicalClock, MessageLogger, PhysicalClock
 from db import Database
+from reference_client import ReferenceClient
 
-# ---- config ---
+# ---- config --
 SERVER_NAME = os.getenv("SERVER_NAME", "server")
-BROKER_ADDR = os.getenv("BROKER_ADDR", "tcp://broker:5556")
-PUB_ADDR = os.getenv("PUB_ADDR", "tcp://proxy:5557")
+BROKER_ADDR = os.getenv("BROKER_ADDR", "tcp://broker:5556")            
+PUB_ADDR = os.getenv("PUB_ADDR", "tcp://proxy:5557")                    
+REFERENCE_ADDR = os.getenv("REFERENCE_ADDR", "tcp://reference:5559")    
 DB_PATH = os.getenv("DB_PATH", "/data/server.db")
+HEARTBEAT_EVERY = int(os.getenv("HEARTBEAT_EVERY", "10"))              
+CLOCK_SKEW_MS = int(os.getenv("SERVER_CLOCK_SKEW_MS", "0"))            
 
-# regra de nomes (usuário e canal): letras, números, "_" e "-", de 1 a 32 caracteres
+# Regra de nomes (usuário e canal): letras, números, "_" e "-", de 1 a 32 caracteres.
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 MAX_TEXT = 500  # tamanho máximo de uma mensagem publicada
 
-
-# ---------------------------------------------------------------------
-# utilidaddes
-# ---------------------------------------------------------------------
-def now_ms() -> int:
-    return int(time.time() * 1000)
+# ---- relógicos e log ---
+logical = LogicalClock()
+physical = PhysicalClock(CLOCK_SKEW_MS)
+logger = MessageLogger(SERVER_NAME, physical.now_ms)
 
 
-def fmt_value(field, value) -> str:
-    #valor legível de um campo (enum vira o nome, ex.: 0 -> OK)
-    if field.type == field.TYPE_ENUM:
-        return field.enum_type.values_by_number[value].name
-    return str(value)
+def stamp(env: "bbs_pb2.Envelope") -> None:
+    env.timestamp = physical.now_ms()
+    env.logical_clock = logical.tick()
 
 
-def describe_body(env: "bbs_pb2.Envelope") -> str:
-    """
-    Lista TODOS os campos da mensagem como chave=valor, inclusive os que
-    têm valor padrão (ex.: status=OK, que o formato texto do protobuf omitiria).
-    Strings vazias (ex.: error quando não há erro) são omitidas para não poluir.
-    Funciona para qualquer mensagem nova que for adicionada ao .proto.
-    """
-    kind = env.WhichOneof("body")
-    if kind is None:
-        return ""                   #ignora mensagens em branco
-    body = getattr(env, kind)
-    parts = []
-    for f in body.DESCRIPTOR.fields:
-        value = getattr(body, f.name)
-        if isinstance(value, (str, bytes, int, float, bool)):
-            if value == "":
-                continue
-            parts.append(f"{f.name}={fmt_value(f, value)}")
-        else:
-            parts.append(f"{f.name}=[{', '.join(fmt_value(f, v) for v in value)}]")
-    return " ".join(parts)
-
-
-def log(direction: str, env: "bbs_pb2.Envelope") -> None:
-    #exibição das mensagens
-    kind = env.WhichOneof("body") or "(vazio)"
-    clock = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    sent_at = datetime.fromtimestamp(env.timestamp / 1000).strftime("%H:%M:%S.%f")[:-3]
-    body = describe_body(env)
-    content = f"{body}  ts={sent_at}" if body else f"ts={sent_at}"
-    print(f"{clock} | {SERVER_NAME:<10} | {direction:<4} | {kind:<19} | {content}", flush=True)
+def send_reply(sock, env: "bbs_pb2.Envelope") -> None:
+    stamp(env)
+    logger.log("SEND", env)
+    sock.send(env.SerializeToString())
 
 
 def new_reply() -> "bbs_pb2.Envelope":
-    """Cria um Envelope de resposta já com o timestamp do envio."""
-    return bbs_pb2.Envelope(timestamp=now_ms())
+    return bbs_pb2.Envelope()
 
 
-# ---------------------------------------------------------------------
-# Handlers: um por tipo de requisição. Todos recebem (db, pub, req) e
-# devolvem o Envelope de resposta. Só o de publicação usa o socket "pub".
-# OBS: usamos SetInParent() para garantir que o campo do oneof fique
-# "marcado" mesmo quando todos os valores são os padrão (ex.: status=OK=0).
-# ---------------------------------------------------------------------
+# --- handlers ---
+
 def handle_login(db: Database, pub, req: "bbs_pb2.Envelope") -> "bbs_pb2.Envelope":
     reply = new_reply()
     reply.login_rep.SetInParent()
@@ -90,7 +57,7 @@ def handle_login(db: Database, pub, req: "bbs_pb2.Envelope") -> "bbs_pb2.Envelop
         reply.login_rep.error = "nome inválido (use 1-32 caracteres: letras, números, _ ou -)"
         return reply
 
-    # Relogin do mesmo nome é permitido (o bot pode ter reiniciado).
+    # relogin do mesmo nome é permitido
     db.register_login(username, req.timestamp)
     reply.login_rep.status = bbs_pb2.OK
     return reply
@@ -121,10 +88,6 @@ def handle_list_channels(db: Database, pub, req: "bbs_pb2.Envelope") -> "bbs_pb2
 
 
 def handle_publish(db: Database, pub, req: "bbs_pb2.Envelope") -> "bbs_pb2.Envelope":
-    """
-    Valida o pedido, grava a mensagem no banco (persistência em disco), publica no tópico do canal
-    e só então responde ao bot com o status (OK ou erro).
-    """
     reply = new_reply()
     reply.publish_rep.SetInParent()
     p = req.publish_req
@@ -141,29 +104,29 @@ def handle_publish(db: Database, pub, req: "bbs_pb2.Envelope") -> "bbs_pb2.Envel
     if len(p.text) > MAX_TEXT:
         return fail(f"mensagem maior que {MAX_TEXT} caracteres")
 
-    # Resolve o nome oficial do canal ("Geral" -> "geral"); None = não existe.
+    # resolve o nome oficial do canal
     channel = db.find_channel(p.channel)
     if channel is None:
         return fail("canal não existe")
 
-    # Mensagem que os assinantes vão receber (com o timestamp do envio da publicação).
+    # mensagem que os assinantes vão receber
     published = new_reply()
     published.channel_msg.SetInParent()
     published.channel_msg.channel = channel
     published.channel_msg.username = p.username
     published.channel_msg.text = p.text
+    stamp(published)  # hora e relógio lógico do envio da publicação
 
-    db.add_message(channel, p.username, p.text, req.timestamp, published.timestamp, SERVER_NAME)
+    db.add_message(channel, p.username, p.text, req.timestamp, published.timestamp,
+                   SERVER_NAME, req.logical_clock, published.logical_clock)
 
-    # 2 frames: [tópico = nome do canal] [Envelope serializado]
     pub.send_multipart([channel.encode("utf-8"), published.SerializeToString()])
-    log("PUB", published)
+    logger.log("PUB", published)
 
     reply.publish_rep.status = bbs_pb2.OK
     return reply
 
 
-# Tabela de despacho: nome do campo do oneof -> função que trata.
 HANDLERS = {
     "login_req": handle_login,
     "create_channel_req": handle_create_channel,
@@ -173,7 +136,6 @@ HANDLERS = {
 
 
 def process(db: Database, pub, raw: bytes) -> "bbs_pb2.Envelope":
-    """Transforma os bytes recebidos na resposta (sempre devolve algo)."""
     try:
         req = bbs_pb2.Envelope.FromString(raw)
     except DecodeError:
@@ -182,7 +144,8 @@ def process(db: Database, pub, raw: bytes) -> "bbs_pb2.Envelope":
         print(f"[{SERVER_NAME}] RECV bytes inválidos ({len(raw)} bytes)", flush=True)
         return reply
 
-    log("RECV", req)
+    logical.observe(req.logical_clock)  # regra 2 de Lamport: máximo entre o recebido e o atual
+    logger.log("RECV", req, f"  local_lc={logical.value}")
 
     handler = HANDLERS.get(req.WhichOneof("body"))
     if handler is None:
@@ -194,23 +157,31 @@ def process(db: Database, pub, raw: bytes) -> "bbs_pb2.Envelope":
 
 def main() -> None:
     db = Database(DB_PATH)
-
     ctx = zmq.Context()
-    rep = ctx.socket(zmq.REP)
-    rep.connect(BROKER_ADDR)   # o servidor se conecta ao broker (não o contrário)
 
+    reference = ReferenceClient(ctx, REFERENCE_ADDR, SERVER_NAME, logical, physical, logger)
+    rank = reference.register()
+    reference.list_servers()
+
+    rep = ctx.socket(zmq.REP)
+    rep.connect(BROKER_ADDR)
     pub = ctx.socket(zmq.PUB)
-    pub.connect(PUB_ADDR)      # e ao proxy Pub/Sub (XSUB)
+    pub.connect(PUB_ADDR)
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    print(f"[{SERVER_NAME}] pronto | broker={BROKER_ADDR} | proxy={PUB_ADDR} | db={DB_PATH}", flush=True)
+    logger.note(f"pronto | rank={rank} | broker={BROKER_ADDR} | proxy={PUB_ADDR} | db={DB_PATH} "
+                f"| desvio do relógio simulado={CLOCK_SKEW_MS} ms")
 
+    received = 0
     try:
         while True:
-            raw = rep.recv()            # bloqueia até chegar uma requisição
+            raw = rep.recv()
             reply = process(db, pub, raw)
-            log("SEND", reply)
-            rep.send(reply.SerializeToString())
+            send_reply(rep, reply)
+
+            received += 1
+            if received % HEARTBEAT_EVERY == 0:
+                reference.heartbeat()
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:

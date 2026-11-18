@@ -22,7 +22,7 @@ def main():
 
     print(f"[broker] clientes em :{FRONTEND_PORT} | servidores em :{BACKEND_PORT}", flush=True)
     try:
-        # zmq.proxy fica em loop infinito copiando frontend e backend
+        # zmq.proxy fica em loop infinito copiando frontend <-> backend.
         zmq.proxy(frontend, backend)
     except (KeyboardInterrupt, SystemExit):
         pass
