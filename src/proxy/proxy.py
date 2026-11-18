@@ -1,17 +1,3 @@
-"""
-proxy.py - Proxy Pub/Sub (XSUB/XPUB), separado do broker REQ/REP.
-
-    Servidores (PUB) ---> [XSUB :5557   PROXY   XPUB :5558] ---> Bots (SUB)
-
-Por que um proxy?
-  * Publicadores (servidores) e assinantes (bots) só precisam conhecer UM
-    endereço fixo cada, sem saber quantos existem do outro lado.
-  * Servidores entram e saem sem os bots perceberem.
-  * O XPUB repassa as inscrições dos bots para o XSUB, que as repassa aos
-    publicadores - assim o tópico só trafega se alguém estiver inscrito.
-
-Assim como o broker, o proxy NÃO interpreta as mensagens: só repassa os frames.
-"""
 import os
 import signal
 import sys

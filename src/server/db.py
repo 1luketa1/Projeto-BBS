@@ -1,28 +1,16 @@
-"""
-db.py - Camada de persistência (SQLite).
-
-Cada servidor tem o SEU PRÓPRIO arquivo .db (a especificação proíbe
-compartilhar o arquivo entre servidores). O arquivo fica em um volume
-Docker, então sobrevive a reinicializações do container.
-
-Tabelas:
-  logins   -> todo login realizado, com o timestamp          (Parte 1)
-  channels -> todos os canais criados (nome único)           (Parte 1)
-  messages -> toda mensagem publicada em um canal     docker compose exec server1 python -c "       (Parte 2)
-"""
 import os
 import sqlite3
 
 
 class Database:
     def __init__(self, path: str):
-        # Garante que a pasta do arquivo exista (ex.: /data).
+        # Garante que a pasta do arquivo exista
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.conn = sqlite3.connect(path)
         self._create_tables()
 
     def _create_tables(self):
-        # "with self.conn" faz commit automático (ou rollback se der erro).
+        # "with self.conn" faz commit automático ou rollback se der erro
         with self.conn:
             self.conn.execute(
                 """CREATE TABLE IF NOT EXISTS logins (
@@ -54,7 +42,7 @@ class Database:
 
     # --- logins ---
     def register_login(self, username: str, timestamp: int) -> None:
-        """Guarda o login (mesmo usuário pode aparecer várias vezes)."""
+        #guarda o login (mesmo usuário pode aparecer várias vezes)
         with self.conn:
             self.conn.execute(
                 "INSERT INTO logins (username, timestamp) VALUES (?, ?)",
@@ -63,7 +51,7 @@ class Database:
 
     # --- canais ---
     def create_channel(self, name: str, created_by: str, timestamp: int) -> bool:
-        """Cria o canal. Retorna False se já existir um com esse nome."""
+        #cria o canal, retorna false se já existir um com esse nome
         try:
             with self.conn:
                 self.conn.execute(
@@ -71,20 +59,18 @@ class Database:
                     (name, created_by, timestamp),
                 )
             return True
-        except sqlite3.IntegrityError:  # violou o UNIQUE
+        except sqlite3.IntegrityError:
             return False
 
     def list_channels(self) -> list[str]:
-        """Nomes de todos os canais existentes, em ordem de criação."""
+        #nomes de todos os canais existentes em ordem de criação
         rows = self.conn.execute("SELECT name FROM channels ORDER BY id").fetchall()
         return [r[0] for r in rows]
 
     def find_channel(self, name: str):
-        """
-        Devolve o nome "oficial" do canal (como foi criado) ou None se não existir.
-        A busca ignora maiúsculas/minúsculas, então "Geral" encontra "geral".
-        O servidor publica sempre com o nome oficial como tópico.
-        """
+        # devolve o nome "oficial" do canal ou None se não existir
+        # não é case sensitive
+        # o servidor publica sempre com o nome oficial como tópico
         row = self.conn.execute("SELECT name FROM channels WHERE name = ?", (name,)).fetchone()
         return row[0] if row else None
 
@@ -94,7 +80,7 @@ class Database:
         """
         Guarda uma mensagem publicada com TODOS os dados da troca: quem, onde,
         o quê, quando o bot enviou, quando o servidor publicou e qual servidor
-        tratou. Assim é possível reconstruir o histórico depois.
+        tratou, pode ser útil
         """
         with self.conn:
             self.conn.execute(

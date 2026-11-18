@@ -150,7 +150,7 @@ public class Bot implements AutoCloseable {
     }
 
     /**
-     * Lista TODOS os campos da mensagem como chave=valor, inclusive os de valor padrão
+     * Lista todos os campos da mensagem como chave=valor, inclusive os de valor padrão
      * Ignora strings vazias, par isso, usamos os descritores, então funciona para qualquer mensagem nova adicionada ao .proto */
     private static String describeBody(Envelope env) {
         Descriptors.FieldDescriptor active = activeField(env);
@@ -187,7 +187,7 @@ public class Bot implements AutoCloseable {
         log(direction, env, "");
     }
 
-    /** Mensagem informativa do bot (não é troca de mensagens com o servidor). */
+    /** Mensagem informativa do bot */
     private void note(String text) {
         System.out.printf("%s | %-10s | INFO | %s%n", LocalTime.now().format(CLOCK), username, text);
     }

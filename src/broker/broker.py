@@ -1,19 +1,3 @@
-"""
-broker.py - Intermediário entre clientes e servidores.
-
-    Clientes (REQ) ---> [ROUTER :5555  BROKER  DEALER :5556] ---> Servidores (REP)
-
-Por que um broker?
-  * Clientes só conhecem UM endereço fixo (broker:5555); não precisam saber
-    quantos servidores existem.
-  * Servidores se CONECTAM ao broker (porta 5556). Para adicionar ou remover
-    um servidor, basta subir/derrubar o container - sem parar o serviço.
-  * O DEALER distribui as requisições entre os servidores conectados
-    (round-robin), e o ROUTER devolve cada resposta ao cliente certo.
-
-O broker NÃO interpreta as mensagens: apenas repassa bytes. Por isso ele
-não precisa do código gerado pelo protobuf.
-"""
 import os
 import signal
 import sys
@@ -38,7 +22,7 @@ def main():
 
     print(f"[broker] clientes em :{FRONTEND_PORT} | servidores em :{BACKEND_PORT}", flush=True)
     try:
-        # zmq.proxy fica em loop infinito copiando frontend <-> backend.
+        # zmq.proxy fica em loop infinito copiando frontend e backend
         zmq.proxy(frontend, backend)
     except (KeyboardInterrupt, SystemExit):
         pass

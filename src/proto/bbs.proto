@@ -1,19 +1,8 @@
-// =====================================================================
-// bbs.proto - Contrato de mensagens entre clientes (Java) e servidores (Python)
-//
-// Este é o ÚNICO arquivo que define o formato das mensagens. Dele são
-// gerados automaticamente as classes Python (servidor) e Java (cliente),
-// garantindo que os dois lados falem exatamente o mesmo "idioma".
-//
-// Regras da especificação atendidas aqui:
-//   1. Toda mensagem carrega o timestamp do envio (campo Envelope.timestamp)
-//   2. Serialização binária (Protocol Buffers) - nada de JSON/XML/texto
-// =====================================================================
 syntax = "proto3";
 
 package bbs;
 
-// Opções usadas só pelo gerador de código Java.
+// usadas só pelo gerador de código do java
 option java_package = "bbs.proto";
 option java_multiple_files = true;
 
@@ -23,13 +12,6 @@ enum Status {
   ERROR = 1;
 }
 
-// ---------------------------------------------------------------------
-// Envelope: todo pacote trafegado no ZeroMQ é UM Envelope.
-// O "oneof body" garante que apenas um dos tipos abaixo esteja presente,
-// o que permite ao servidor descobrir o tipo com WhichOneof("body").
-// Para as próximas partes (publicar mensagens, histórico, etc.), basta
-// adicionar novos tipos no oneof, com números de campo novos.
-// ---------------------------------------------------------------------
 message Envelope {
   int64 timestamp = 1;  // OBRIGATÓRIO: epoch em milissegundos do momento do envio
 
@@ -41,20 +23,20 @@ message Envelope {
     ListChannelsRequest  list_channels_req  = 14;
     ListChannelsReply    list_channels_rep  = 15;
     ErrorReply           error_rep          = 16;  // resposta genérica (mensagem inválida)
-    PublishRequest       publish_req        = 17;  // Parte 2: bot pede ao servidor para publicar
-    PublishReply         publish_rep        = 18;  // Parte 2: status da publicação
-    ChannelMessage       channel_msg        = 19;  // Parte 2: o que o servidor publica no tópico
+    PublishRequest       publish_req        = 17;  // bot pede ao servidor para publicar
+    PublishReply         publish_rep        = 18;  // status da publicação
+    ChannelMessage       channel_msg        = 19;  // o que o servidor publica no tópico
   }
 }
 
-// --- Login: o bot envia só o nome (protótipo, sem senha) -------------
+// --- Login ---
 message LoginRequest { string username = 1; }
 message LoginReply {
   Status status = 1;
   string error  = 2;  // preenchido somente quando status == ERROR
 }
 
-// --- Criação de canal ------------------------------------------------
+// --- Criação de canal ---
 message CreateChannelRequest {
   string channel  = 1;  // nome do canal desejado
   string username = 2;  // quem está criando (fica registrado no banco)
@@ -64,33 +46,27 @@ message CreateChannelReply {
   string error  = 2;
 }
 
-// --- Listagem de canais: o pedido é vazio, a resposta traz só os nomes
+// --- Listagem de canais ---
 message ListChannelsRequest {}
 message ListChannelsReply { repeated string channels = 1; }
 
 // --- Erro genérico (ex.: servidor recebeu bytes que não são um Envelope)
 message ErrorReply { string error = 1; }
 
-// =====================================================================
-// PARTE 2 - Publicação em canais (Pub/Sub)
-// =====================================================================
-
-// Bot -> Servidor (REQ): "publique este texto neste canal".
+// req de publicação
 message PublishRequest {
   string channel  = 1;
   string username = 2;  // autor da mensagem
   string text     = 3;
 }
 
-// Servidor -> Bot (REP): resultado da publicação.
+// reply de resultado da publicação
 message PublishReply {
   Status status = 1;
   string error  = 2;    // ex.: "canal não existe"
 }
 
-// Servidor -> Canal (PUB): é o que os assinantes recebem.
-// No ZeroMQ vai em 2 frames: [nome do canal (tópico)] [Envelope serializado].
-// O timestamp do envio da publicação está em Envelope.timestamp.
+// "entrega" que os assinantes recebem
 message ChannelMessage {
   string channel  = 1;
   string username = 2;

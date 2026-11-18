@@ -1,20 +1,3 @@
-"""
-server.py - Servidor do BBS (Partes 1 e 2).
-
-Sockets:
-  * REP -> conecta no broker (:5556). Recebe os pedidos dos bots:
-           login, criar canal, listar canais e publicar mensagem.
-  * PUB -> conecta no proxy (:5557, XSUB). Publica as mensagens dos canais,
-           usando o NOME DO CANAL como tópico.
-
-Fluxo de uma publicação (diagrama da Parte 2):
-  bot --REQ(canal, mensagem)--> servidor --PUB(mensagem)--> canal (proxy -> assinantes)
-  bot <--REP(OK/erro)---------- servidor
-
-Regra do ZeroMQ REP: TODA requisição recebida precisa de exatamente UMA
-resposta antes da próxima recepção. Por isso, até para mensagens inválidas
-enviamos uma resposta (ErrorReply).
-"""
 import os
 import re
 import signal
@@ -28,27 +11,26 @@ from google.protobuf.message import DecodeError
 import bbs_pb2  # gerado a partir de proto/bbs.proto durante o build da imagem
 from db import Database
 
-# ---- Configuração (vem de variáveis de ambiente definidas no compose) --
+# ---- config ---
 SERVER_NAME = os.getenv("SERVER_NAME", "server")
-BROKER_ADDR = os.getenv("BROKER_ADDR", "tcp://broker:5556")  # REQ/REP
-PUB_ADDR = os.getenv("PUB_ADDR", "tcp://proxy:5557")         # Pub/Sub (XSUB do proxy)
+BROKER_ADDR = os.getenv("BROKER_ADDR", "tcp://broker:5556")
+PUB_ADDR = os.getenv("PUB_ADDR", "tcp://proxy:5557")
 DB_PATH = os.getenv("DB_PATH", "/data/server.db")
 
-# Regra de nomes (usuário e canal): letras, números, "_" e "-", de 1 a 32 caracteres.
+# regra de nomes (usuário e canal): letras, números, "_" e "-", de 1 a 32 caracteres
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 MAX_TEXT = 500  # tamanho máximo de uma mensagem publicada
 
 
 # ---------------------------------------------------------------------
-# Utilitários
+# utilidaddes
 # ---------------------------------------------------------------------
 def now_ms() -> int:
-    """Timestamp atual em milissegundos (campo obrigatório de toda mensagem)."""
     return int(time.time() * 1000)
 
 
 def fmt_value(field, value) -> str:
-    """Valor legível de um campo (enum vira o nome, ex.: 0 -> OK)."""
+    #valor legível de um campo (enum vira o nome, ex.: 0 -> OK)
     if field.type == field.TYPE_ENUM:
         return field.enum_type.values_by_number[value].name
     return str(value)
@@ -63,25 +45,22 @@ def describe_body(env: "bbs_pb2.Envelope") -> str:
     """
     kind = env.WhichOneof("body")
     if kind is None:
-        return ""
+        return ""                   #ignora mensagens em branco
     body = getattr(env, kind)
     parts = []
     for f in body.DESCRIPTOR.fields:
         value = getattr(body, f.name)
-        if isinstance(value, (str, bytes, int, float, bool)):   # campo simples
+        if isinstance(value, (str, bytes, int, float, bool)):
             if value == "":
                 continue
             parts.append(f"{f.name}={fmt_value(f, value)}")
-        else:                                                    # campo repeated (lista)
+        else:
             parts.append(f"{f.name}=[{', '.join(fmt_value(f, v) for v in value)}]")
     return " ".join(parts)
 
 
 def log(direction: str, env: "bbs_pb2.Envelope") -> None:
-    """
-    Exibe cada mensagem enviada/recebida com todo o conteúdo (exigência da spec):
-      HH:MM:SS.mmm | origem | RECV/SEND/PUB | tipo | campos...  ts=<hora do envio>
-    """
+    #exibição das mensagens
     kind = env.WhichOneof("body") or "(vazio)"
     clock = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     sent_at = datetime.fromtimestamp(env.timestamp / 1000).strftime("%H:%M:%S.%f")[:-3]
