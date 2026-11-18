@@ -1,3 +1,5 @@
+# Contexto de build = raiz do projeto. Mantemos client/ e proto/ lado a lado
+# em /build para que o caminho ../proto do pom.xml funcione também aqui.
 FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /build
 COPY proto/ proto/

@@ -1,3 +1,18 @@
+"""
+reference.py - Serviço de referência (Parte 3).
+
+Conversa SOMENTE com os servidores (socket REP na porta 5559); não recebe
+mensagens dos clientes. Responsabilidades:
+  1. informar o rank do servidor        REQ: nome -> REP: rank
+  2. armazenar a lista de servidores    nome + rank, sem repetição de nomes
+  3. fornecer a lista de servidores     REQ: list -> REP: [nomes e ranks]
+  4. atualizar a lista pelo heartbeat   quem ficar HEARTBEAT_TIMEOUT_SECONDS
+                                        sem enviar heartbeat é removido
+  (A hora correta deixou de vir daqui na Parte 4: o relógio dos servidores é
+   sincronizado pelo coordenador eleito, com o algoritmo de Berkeley.)
+
+As mensagens também carregam timestamp e relógio lógico (a referência tem o seu contador).
+"""
 import os
 import re
 import signal
@@ -16,7 +31,7 @@ HEARTBEAT_TIMEOUT = float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "30"))
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
-# agora usa o horário do sistema
+# A referência é a fonte da hora correta: usa o relógio do sistema sem ajuste.
 logical = LogicalClock()
 registry = Registry(HEARTBEAT_TIMEOUT)
 
@@ -29,6 +44,7 @@ logger = MessageLogger("reference", now_ms)
 
 
 def stamp(env: "bbs_pb2.Envelope") -> None:
+    """Carimba no momento do envio (hora + relógio lógico incrementado antes de enviar)."""
     env.timestamp = now_ms()
     env.logical_clock = logical.tick()
 
@@ -62,7 +78,6 @@ def handle_list(req: "bbs_pb2.Envelope") -> "bbs_pb2.Envelope":
 def handle_heartbeat(req: "bbs_pb2.Envelope") -> "bbs_pb2.Envelope":
     reply = bbs_pb2.Envelope()
     reply.heartbeat_rep.SetInParent()
-    reply.heartbeat_rep.reference_time = now_ms()   # a hora correta vai em toda resposta de heartbeat
     if registry.heartbeat(req.heartbeat_req.name):
         reply.heartbeat_rep.status = bbs_pb2.OK
     else:
@@ -86,7 +101,7 @@ def process(raw: bytes) -> "bbs_pb2.Envelope":
         reply.error_rep.error = "mensagem inválida"
         return reply
 
-    logical.observe(req.logical_clock)   #máximo entre o recebido e o atual
+    logical.observe(req.logical_clock)   # regra 2: máximo entre o recebido e o atual
     logger.log("RECV", req, f"  local_lc={logical.value}")
 
     handler = HANDLERS.get(req.WhichOneof("body"))
@@ -110,7 +125,7 @@ def main() -> None:
 
     try:
         while True:
-            # espera até 1 s por uma mensagem p/ que a limpeza roda mesmo sem tráfego
+            # Espera até 1 s por uma mensagem; assim a limpeza roda mesmo sem tráfego.
             events = dict(poller.poll(1000))
 
             for name in registry.purge():

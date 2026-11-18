@@ -1,6 +1,6 @@
-# Orquestração do BBS - Partes 1, 2 e 3.
+# Orquestração do BBS - Partes 1 a 4.
 #   docker compose up --build --no-log-prefix                  -> referência + broker + proxy + 1 servidor + 3 bots
-#   docker compose --profile multi up --build --no-log-prefix  -> adiciona o server2
+#   docker compose --profile multi up --build --no-log-prefix  -> adiciona o server2 (necessário para ver eleição e Berkeley)
 services:
 
   # Parte 3: serviço de referência (rank, lista de servidores, heartbeat e hora correta).
@@ -26,9 +26,12 @@ services:
       SERVER_NAME: server1
       BROKER_ADDR: tcp://broker:5556
       PUB_ADDR: tcp://proxy:5557
+      SUB_ADDR: tcp://proxy:5558
       REFERENCE_ADDR: tcp://reference:5559
+      PEER_PORT: "5560"                 # porta em que os outros servidores nos encontram (eleição/relógio)
       DB_PATH: /data/server.db
       HEARTBEAT_EVERY: "10"             # heartbeat a cada 10 mensagens de clientes (spec)
+      CLOCK_SYNC_EVERY: "15"            # sincronização do relógio a cada 15 mensagens (spec)
       # Simula um relógio físico 3 s adiantado para demonstrar a sincronização
       # (todos os containers compartilham o relógio real). Use "0" para desativar.
       SERVER_CLOCK_SKEW_MS: "3000"
@@ -38,7 +41,8 @@ services:
 
   # Servidor 2 - só sobe com --profile multi.
   # ATENÇÃO: os bancos NÃO são replicados; com 2 servidores o broker alterna
-  # as requisições e cada um enxerga apenas os seus canais/mensagens.
+  # as requisições e cada um enxerga apenas os seus canais/mensagens
+  # (por isso podem aparecer "canal não existe" nos bots; a replicação fica para a próxima parte).
   server2:
     profiles: ["multi"]
     build: { context: ., dockerfile: server/Dockerfile }
@@ -46,9 +50,12 @@ services:
       SERVER_NAME: server2
       BROKER_ADDR: tcp://broker:5556
       PUB_ADDR: tcp://proxy:5557
+      SUB_ADDR: tcp://proxy:5558
       REFERENCE_ADDR: tcp://reference:5559
+      PEER_PORT: "5560"                 # porta em que os outros servidores nos encontram (eleição/relógio)
       DB_PATH: /data/server.db
       HEARTBEAT_EVERY: "10"
+      CLOCK_SYNC_EVERY: "15"
       SERVER_CLOCK_SKEW_MS: "-2000"     # 2 s atrasado (demonstração)
     volumes:
       - server2_data:/data
