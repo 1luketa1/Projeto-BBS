@@ -1,25 +1,16 @@
-# Orquestração do BBS - Partes 1 a 4.
-#   docker compose up --build --no-log-prefix                  -> referência + broker + proxy + 1 servidor + 3 bots
-#   docker compose --profile multi up --build --no-log-prefix  -> adiciona o server2 (necessário para ver eleição e Berkeley)
 services:
-
-  # Parte 3: serviço de referência (rank, lista de servidores, heartbeat e hora correta).
-  # Só conversa com os servidores; os bots não o conhecem.
   reference:
     build: { context: ., dockerfile: reference/Dockerfile }
     environment:
       REFERENCE_PORT: "5559"
-      HEARTBEAT_TIMEOUT_SECONDS: "30"   # sem heartbeat por este tempo = removido da lista
+      HEARTBEAT_TIMEOUT_SECONDS: "30"
 
-  # Intermediário REQ/REP (ROUTER/DEALER). Único endereço que os clientes usam para pedidos.
   broker:
     build: { context: ., dockerfile: broker/Dockerfile }
 
-  # Proxy Pub/Sub (XSUB :5557 para publicadores, XPUB :5558 para assinantes).
   proxy:
     build: { context: ., dockerfile: proxy/Dockerfile }
 
-  # Servidor 1 - banco SQLite próprio, em volume próprio.
   server1:
     build: { context: ., dockerfile: server/Dockerfile }
     environment:
@@ -28,23 +19,17 @@ services:
       PUB_ADDR: tcp://proxy:5557
       SUB_ADDR: tcp://proxy:5558
       REFERENCE_ADDR: tcp://reference:5559
-      PEER_PORT: "5560"                 # porta em que os outros servidores nos encontram (eleição/relógio)
+      PEER_PORT: "5560"
       DB_PATH: /data/server.db
-      HEARTBEAT_EVERY: "10"             # heartbeat a cada 10 mensagens de clientes (spec)
-      CLOCK_SYNC_EVERY: "15"            # sincronização do relógio a cada 15 mensagens (spec)
-      # Simula um relógio físico 3 s adiantado para demonstrar a sincronização
-      # (todos os containers compartilham o relógio real). Use "0" para desativar.
+      HEARTBEAT_EVERY: "10"
+      CLOCK_SYNC_EVERY: "15"
+      REPLICATION_SYNC_EVERY: "20"
       SERVER_CLOCK_SKEW_MS: "3000"
     volumes:
       - server1_data:/data
     depends_on: [reference, broker, proxy]
 
-  # Servidor 2 - só sobe com --profile multi.
-  # ATENÇÃO: os bancos NÃO são replicados; com 2 servidores o broker alterna
-  # as requisições e cada um enxerga apenas os seus canais/mensagens
-  # (por isso podem aparecer "canal não existe" nos bots; a replicação fica para a próxima parte).
   server2:
-    profiles: ["multi"]
     build: { context: ., dockerfile: server/Dockerfile }
     environment:
       SERVER_NAME: server2
@@ -52,17 +37,21 @@ services:
       PUB_ADDR: tcp://proxy:5557
       SUB_ADDR: tcp://proxy:5558
       REFERENCE_ADDR: tcp://reference:5559
-      PEER_PORT: "5560"                 # porta em que os outros servidores nos encontram (eleição/relógio)
+      PEER_PORT: "5560"
       DB_PATH: /data/server.db
       HEARTBEAT_EVERY: "10"
       CLOCK_SYNC_EVERY: "15"
+      REPLICATION_SYNC_EVERY: "20"
       SERVER_CLOCK_SKEW_MS: "-2000"     # 2 s atrasado (demonstração)
     volumes:
       - server2_data:/data
     depends_on: [reference, broker, proxy]
 
-  # Bots (clientes Java). 3 réplicas, cada uma com nome aleatório diferente.
-  # Comportamento padronizado: 5 canais, 3 inscrições, rajadas de 10 mensagens (1/s).
+  # ---- modelo para um terceiro servidor ------------------
+  # 1) copie o bloco do server2 trocando "server2" por "server3" em TRÊS lugares:
+  #    nome do serviço, SERVER_NAME e o volume;
+  # 2) declare o volume server3_data na seção "volumes:" no fim do arquivo.
+
   client:
     build: { context: ., dockerfile: client/Dockerfile }
     environment:
@@ -74,8 +63,9 @@ services:
       MESSAGE_INTERVAL_MS: "1000"
     deploy:
       replicas: 3
-    depends_on: [broker, proxy, server1]
+    depends_on: [broker, proxy, server1, server2]
 
 volumes:
   server1_data:
   server2_data:
+  # server3_data:

@@ -25,48 +25,14 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/**
- * Bot (cliente) do BBS - Partes 1 e 2.
- *
- * Dois sockets, cada um com sua função:
- *   REQ -> broker (:5555): login, criar/listar canais e pedir publicação.
- *   SUB -> proxy  (:5558): recebe as mensagens dos canais em que está inscrito.
- *
- * Comportamento padronizado pela especificação (sem nenhuma interação humana):
- *   1. Se existirem menos de 5 canais, cria um novo.
- *   2. Se estiver inscrito em menos de 3 canais, inscreve-se em mais um (aleatório).
- *   3. Loop infinito: escolhe um canal da lista e publica 10 mensagens
- *      aleatórias, com 1 segundo de intervalo entre elas.
- *
- * NOTA: os passos 1 e 2 são reavaliados a cada volta do loop. Assim o bot
- * converge para 5 canais / 3 inscrições mesmo começando do zero.
- * Para executá-los só uma vez, mova as duas chamadas para antes do while em run().
- *
- * Tudo roda em UMA thread. Como o bot recebe publicações enquanto "espera"
- * entre as suas ações, o Thread.sleep foi substituído por pause(): ela fica
- * esperando no socket SUB (com timeout). Se uma publicação chega durante a
- * espera, é exibida na hora; se o tempo acaba, o bot segue para a próxima ação.
- * Durante uma requisição ao servidor (alguns milissegundos), as publicações
- * ficam na fila do socket SUB e são exibidas logo em seguida.
- *
- * Parte 3 - relógio lógico (Lamport): o contador começa em 0 junto com o bot, é
- * incrementado ANTES de cada envio e vai na mensagem (campo logical_clock). Ao
- * receber qualquer mensagem (resposta do servidor ou publicação de um canal), o
- * contador vira o MÁXIMO entre o valor recebido e o que o bot possui.
- *
- * Variáveis de ambiente: BROKER_ADDR, SUB_ADDR, BOT_NAME, MIN_CHANNELS (5),
- * MIN_SUBSCRIPTIONS (3), BURST_SIZE (10), MESSAGE_INTERVAL_MS (1000).
- */
 public class Bot implements AutoCloseable {
 
     private static final int TIMEOUT_MS = 5000;   // espera máxima por uma resposta
     private static final int MAX_RETRIES = 5;     // tentativas por requisição
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
-    // Nomes candidatos para canais novos.
     private static final List<String> CHANNEL_POOL =
             List.of("geral", "random", "tecnologia", "jogos", "musica", "filmes");
-    // Frases para as mensagens aleatórias.
     private static final List<String> PHRASES = List.of(
             "Alguém por aqui?", "Bom dia, pessoal!", "Qual a novidade?", "Testando o canal",
             "Esse BBS é nostálgico", "Quem aí lembra do modem 56k?", "Mensagem de teste",
@@ -81,10 +47,10 @@ public class Bot implements AutoCloseable {
     private final Random random = new Random();
 
     private final ZContext ctx = new ZContext();
-    private ZMQ.Socket socket;                  // REQ: pedidos ao servidor (via broker)
-    private final ZMQ.Socket sub;               // SUB: publicações dos canais (via proxy)
+    private ZMQ.Socket socket;
+    private final ZMQ.Socket sub;
     private String username;
-    private long logicalClock = 0;               // relógio lógico (Lamport) deste bot
+    private long logicalClock = 0;
     private final Set<String> subscriptions = new HashSet<>();   // canais em que estamos inscritos
 
     public Bot() {
@@ -98,7 +64,7 @@ public class Bot implements AutoCloseable {
         connect();
 
         sub = ctx.createSocket(SocketType.SUB);
-        sub.connect(subAddr);   // as inscrições (subscribe) são feitas depois, canal a canal
+        sub.connect(subAddr);   // as inscrições são feitas depois, canal a canal
     }
 
     private static String env(String name, String fallback) {
@@ -109,38 +75,31 @@ public class Bot implements AutoCloseable {
     // Rede REQ/REP
     // ------------------------------------------------------------------
 
-    /** (Re)cria o socket REQ. Necessário após timeout: um REQ que perdeu a resposta fica "travado". */
+    /** recria o socket REQ, necessário após timeout */
     private void connect() {
         if (socket != null) {
             ctx.destroySocket(socket);
         }
         socket = ctx.createSocket(SocketType.REQ);
-        socket.setLinger(0);                 // não segurar mensagens pendentes ao fechar
+        socket.setLinger(0);
         socket.setReceiveTimeOut(TIMEOUT_MS);
         socket.connect(brokerAddr);
     }
 
-    /**
-     * Envia o Envelope e devolve a resposta. Se o servidor não responder a
-     * tempo (ex.: ainda subindo), recria o socket e tenta de novo.
-     * ATENÇÃO: um reenvio após timeout pode duplicar uma publicação se o
-     * servidor chegou a processar o pedido original (aceitável nesta parte).
-     */
     private Envelope request(Envelope req) {
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            // Carimba NO MOMENTO DO ENVIO: hora e relógio lógico incrementado antes de enviar.
             Envelope msg = req.toBuilder()
                     .setTimestamp(System.currentTimeMillis())
                     .setLogicalClock(++logicalClock)
                     .build();
             log("SEND", msg);
             socket.send(msg.toByteArray(), 0);
-            byte[] data = socket.recv(0);    // null em caso de timeout
+            byte[] data = socket.recv(0);
 
             if (data != null) {
                 try {
                     Envelope rep = Envelope.parseFrom(data);
-                    observeClock(rep.getLogicalClock());   // máximo entre o recebido e o atual
+                    observeClock(rep.getLogicalClock());
                     log("RECV", rep, "  local_lc=" + logicalClock);
                     return rep;
                 } catch (InvalidProtocolBufferException e) {
@@ -153,12 +112,10 @@ public class Bot implements AutoCloseable {
         throw new IllegalStateException("servidor indisponível");
     }
 
-    /** Cria o Envelope; timestamp e relógio lógico são preenchidos em request(), no momento do envio. */
     private static Envelope.Builder envelope() {
         return Envelope.newBuilder();
     }
 
-    /** Regra 2 de Lamport: novo valor = máximo entre o recebido na mensagem e o atual. */
     private void observeClock(long received) {
         logicalClock = Math.max(logicalClock, received);
     }
@@ -171,7 +128,6 @@ public class Bot implements AutoCloseable {
         return LocalTime.ofInstant(Instant.ofEpochMilli(epochMillis), ZoneId.systemDefault()).format(CLOCK);
     }
 
-    /** Valor legível de um campo (enum vira o nome, ex.: OK). */
     private static String fmt(Object value) {
         return value instanceof Descriptors.EnumValueDescriptor e ? e.getName() : value.toString();
     }
@@ -181,12 +137,6 @@ public class Bot implements AutoCloseable {
         return env.getOneofFieldDescriptor(oneof);
     }
 
-    /**
-     * Lista TODOS os campos da mensagem como chave=valor, inclusive os de valor
-     * padrão (ex.: status=OK, que o formato texto do protobuf omitiria).
-     * Strings vazias (ex.: error sem erro) são omitidas. Usa os descritores,
-     * então funciona para qualquer mensagem nova adicionada ao .proto.
-     */
     private static String describeBody(Envelope env) {
         Descriptors.FieldDescriptor active = activeField(env);
         if (active == null) {
@@ -209,11 +159,6 @@ public class Bot implements AutoCloseable {
         return String.join(" ", parts);
     }
 
-    /**
-     * Exibe cada mensagem enviada/recebida com todo o conteúdo (exigência da spec):
-     *   HH:MM:SS.mmm | origem | SEND/RECV | tipo | campos...  ts=<hora do envio>  lc=<relógio lógico de quem enviou>
-     * "suffix" permite acrescentar informação extra (ex.: hora do recebimento).
-     */
     private void log(String direction, Envelope env, String suffix) {
         Descriptors.FieldDescriptor active = activeField(env);
         String kind = active == null ? "(vazio)" : active.getName();
@@ -228,7 +173,6 @@ public class Bot implements AutoCloseable {
         log(direction, env, "");
     }
 
-    /** Mensagem informativa do bot (não é troca de mensagens com o servidor). */
     private void note(String text) {
         System.out.printf("%s | %-10s | INFO | %s%n", LocalTime.now().format(CLOCK), username, text);
     }
@@ -237,7 +181,6 @@ public class Bot implements AutoCloseable {
     // Operações do protocolo (REQ/REP)
     // ------------------------------------------------------------------
 
-    /** Login: uma mensagem de ida, uma de volta. Se der erro, repete com outro nome. */
     public void login() throws InterruptedException {
         String baseName = username;
         while (true) {
@@ -255,7 +198,6 @@ public class Bot implements AutoCloseable {
         }
     }
 
-    /** Pede ao servidor a lista com o nome de todos os canais existentes. */
     public List<String> listChannels() {
         Envelope rep = request(envelope()
                 .setListChannelsReq(ListChannelsRequest.getDefaultInstance())
@@ -263,7 +205,6 @@ public class Bot implements AutoCloseable {
         return new ArrayList<>(rep.getListChannelsRep().getChannelsList());
     }
 
-    /** Pede a criação de um canal. Retorna true se o servidor respondeu OK. */
     public boolean createChannel(String channel) {
         Envelope rep = request(envelope()
                 .setCreateChannelReq(CreateChannelRequest.newBuilder()
@@ -274,7 +215,6 @@ public class Bot implements AutoCloseable {
                 && rep.getCreateChannelRep().getStatus() == Status.OK;
     }
 
-    /** Pede ao servidor para publicar um texto em um canal. Retorna true se OK. */
     public boolean publish(String channel, String text) {
         Envelope rep = request(envelope()
                 .setPublishReq(PublishRequest.newBuilder()
@@ -290,7 +230,6 @@ public class Bot implements AutoCloseable {
     // Assinatura de canais (SUB)
     // ------------------------------------------------------------------
 
-    /** Inscreve-se em um canal (o tópico é o nome do canal). Todas as inscrições usam a mesma conexão. */
     private void subscribe(String channel) {
         if (subscriptions.add(channel)) {
             sub.subscribe(channel.getBytes(StandardCharsets.UTF_8));
@@ -298,11 +237,6 @@ public class Bot implements AutoCloseable {
         }
     }
 
-    /**
-     * Substitui o Thread.sleep: espera "ms" milissegundos recebendo publicações.
-     * O timeout do socket SUB faz o papel do relógio: receiveOne() retorna quando
-     * chega uma mensagem ou quando o tempo restante acaba.
-     */
     private void pause(long ms) {
         long deadline = System.currentTimeMillis() + ms;
         long remaining;
@@ -312,13 +246,12 @@ public class Bot implements AutoCloseable {
         }
     }
 
-    /** Recebe (e exibe) uma publicação, se chegar antes do timeout configurado no socket. */
     private void receiveOne() {
-        String topic = sub.recvStr();                      // frame 1: tópico (null = timeout)
+        String topic = sub.recvStr();
         if (topic == null || !sub.hasReceiveMore()) {
             return;
         }
-        byte[] payload = sub.recv(0);                      // frame 2: Envelope serializado
+        byte[] payload = sub.recv(0);
         handlePublication(topic, payload);
     }
 
@@ -329,14 +262,10 @@ public class Bot implements AutoCloseable {
                 return;
             }
             String channel = env.getChannelMsg().getChannel();
-            // O filtro do ZeroMQ casa por PREFIXO: quem assinou "geral" também receberia
-            // "geral2". Por isso conferimos o nome exato do canal.
             if (!topic.equals(channel) || !subscriptions.contains(channel)) {
                 return;
             }
-            observeClock(env.getLogicalClock());   // a publicação também é uma mensagem recebida
-            // Exibe canal, mensagem, timestamp do envio (ts=), relógio lógico de quem enviou (lc=),
-            // hora do recebimento (received=) e o relógio lógico local após a atualização (local_lc=).
+            observeClock(env.getLogicalClock());
             log("RECV", env, "  received=" + LocalTime.now().format(CLOCK) + "  local_lc=" + logicalClock);
         } catch (InvalidProtocolBufferException e) {
             note("publicação inválida ignorada no tópico '" + topic + "'");
@@ -347,7 +276,6 @@ public class Bot implements AutoCloseable {
     // Comportamento do bot
     // ------------------------------------------------------------------
 
-    /** Passo 1: se há menos de minChannels canais, cria um com nome ainda livre. */
     private void ensureChannels(List<String> existing) {
         if (existing.size() >= minChannels) {
             return;
@@ -357,10 +285,9 @@ public class Bot implements AutoCloseable {
         String name = candidates.isEmpty()
                 ? "canal-" + Integer.toHexString(random.nextInt(0xFFFFF))
                 : candidates.get(random.nextInt(candidates.size()));
-        createChannel(name);   // se outro bot criou antes, o servidor responde "já existe": sem problema
+        createChannel(name);
     }
 
-    /** Passo 2: se está inscrito em menos de minSubscriptions canais, inscreve-se em mais um aleatório. */
     private void ensureSubscriptions(List<String> channels) {
         if (subscriptions.size() >= minSubscriptions) {
             return;
@@ -383,7 +310,7 @@ public class Bot implements AutoCloseable {
             List<String> channels = listChannels();
             if (channels.size() < minChannels) {
                 ensureChannels(channels);
-                channels = listChannels();   // atualiza a lista com o canal recém-criado
+                channels = listChannels();
             }
             ensureSubscriptions(channels);
 
@@ -392,20 +319,19 @@ public class Bot implements AutoCloseable {
                 continue;
             }
 
-            // Passos 4 e 5: escolhe um canal e envia burstSize mensagens, 1 por segundo.
             String target = channels.get(random.nextInt(channels.size()));
             for (int i = 0; i < burstSize; i++) {
                 if (!publish(target, randomText())) {
                     note("publicação em '" + target + "' falhou");
                 }
-                pause(messageIntervalMs);   // espera 1 s ainda recebendo publicações
+                pause(messageIntervalMs);
             }
         }
     }
 
     @Override
     public void close() {
-        ctx.close();   // fecha todos os sockets criados por este contexto
+        ctx.close();
     }
 
     // ------------------------------------------------------------------

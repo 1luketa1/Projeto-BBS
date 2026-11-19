@@ -1,38 +1,18 @@
-// =====================================================================
-// bbs.proto - Contrato de mensagens entre clientes (Java) e servidores (Python)
-//
-// Este é o ÚNICO arquivo que define o formato das mensagens. Dele são
-// gerados automaticamente as classes Python (servidor) e Java (cliente),
-// garantindo que os dois lados falem exatamente o mesmo "idioma".
-//
-// Regras da especificação atendidas aqui:
-//   1. Toda mensagem carrega o timestamp do envio (campo Envelope.timestamp)
-//   2. Serialização binária (Protocol Buffers) - nada de JSON/XML/texto
-// =====================================================================
 syntax = "proto3";
 
 package bbs;
 
-// Opções usadas só pelo gerador de código Java.
 option java_package = "bbs.proto";
 option java_multiple_files = true;
 
-// Resultado padrão de uma operação (usado nas respostas).
 enum Status {
   OK = 0;
   ERROR = 1;
 }
 
-// ---------------------------------------------------------------------
-// Envelope: todo pacote trafegado no ZeroMQ é UM Envelope.
-// O "oneof body" garante que apenas um dos tipos abaixo esteja presente,
-// o que permite ao servidor descobrir o tipo com WhichOneof("body").
-// Para as próximas partes (publicar mensagens, histórico, etc.), basta
-// adicionar novos tipos no oneof, com números de campo novos.
-// ---------------------------------------------------------------------
 message Envelope {
-  int64 timestamp = 1;  // OBRIGATÓRIO: epoch em milissegundos do momento do envio
-  int64 logical_clock = 2;  // Parte 3: contador (relógio lógico de Lamport) de quem ENVIA
+  int64 timestamp = 1;
+  int64 logical_clock = 2;
 
   oneof body {
     LoginRequest         login_req          = 10;
@@ -41,89 +21,74 @@ message Envelope {
     CreateChannelReply   create_channel_rep = 13;
     ListChannelsRequest  list_channels_req  = 14;
     ListChannelsReply    list_channels_rep  = 15;
-    ErrorReply           error_rep          = 16;  // resposta genérica (mensagem inválida)
-    PublishRequest       publish_req        = 17;  // Parte 2: bot pede ao servidor para publicar
-    PublishReply         publish_rep        = 18;  // Parte 2: status da publicação
-    ChannelMessage       channel_msg        = 19;  // Parte 2: o que o servidor publica no tópico
-    RankRequest          rank_req           = 20;  // Parte 3: servidor -> referência
+    ErrorReply           error_rep          = 16;
+    PublishRequest       publish_req        = 17;
+    PublishReply         publish_rep        = 18;
+    ChannelMessage       channel_msg        = 19;
+    RankRequest          rank_req           = 20;
     RankReply            rank_rep           = 21;
     ListServersRequest   list_servers_req   = 22;
     ListServersReply     list_servers_rep   = 23;
     HeartbeatRequest     heartbeat_req      = 24;
     HeartbeatReply       heartbeat_rep      = 25;
-    ClockRequest         clock_req          = 26;  // Parte 4: servidor -> coordenador ("relógio")
-    ClockReply           clock_rep          = 27;  // Parte 4: coordenador -> servidor ("hora correta")
-    ElectionRequest      election_req       = 28;  // Parte 4: servidor -> servidor ("eleição")
-    ElectionReply        election_rep       = 29;  // Parte 4: "OK"
-    CoordinatorMessage   coordinator_msg    = 30;  // Parte 4: publicado no tópico "servers"
+    ClockRequest         clock_req          = 26;
+    ClockReply           clock_rep          = 27;
+    ElectionRequest      election_req       = 28;
+    ElectionReply        election_rep       = 29;
+    CoordinatorMessage   coordinator_msg    = 30;
+    ChannelReplicated    channel_replicated = 31;
+    SyncChannelsRequest  sync_channels_req  = 32;
+    SyncChannelsReply    sync_channels_rep  = 33;
   }
 }
 
-// --- Login: o bot envia só o nome (protótipo, sem senha) -------------
+// --- Login ---
 message LoginRequest { string username = 1; }
 message LoginReply {
   Status status = 1;
-  string error  = 2;  // preenchido somente quando status == ERROR
+  string error  = 2;
 }
 
-// --- Criação de canal ------------------------------------------------
+// --- Criação de canal ---
 message CreateChannelRequest {
-  string channel  = 1;  // nome do canal desejado
-  string username = 2;  // quem está criando (fica registrado no banco)
+  string channel  = 1;
+  string username = 2;
 }
 message CreateChannelReply {
   Status status = 1;
   string error  = 2;
 }
 
-// --- Listagem de canais: o pedido é vazio, a resposta traz só os nomes
+// --- Listagem de canais ---
 message ListChannelsRequest {}
 message ListChannelsReply { repeated string channels = 1; }
 
-// --- Erro genérico (ex.: servidor recebeu bytes que não são um Envelope)
+// --- Erro genérico ---
 message ErrorReply { string error = 1; }
 
-// =====================================================================
-// PARTE 2 - Publicação em canais (Pub/Sub)
-// =====================================================================
-
-// Bot -> Servidor (REQ): "publique este texto neste canal".
 message PublishRequest {
   string channel  = 1;
   string username = 2;  // autor da mensagem
   string text     = 3;
 }
 
-// Servidor -> Bot (REP): resultado da publicação.
 message PublishReply {
   Status status = 1;
   string error  = 2;    // ex.: "canal não existe"
 }
 
-// Servidor -> Canal (PUB): é o que os assinantes recebem.
-// No ZeroMQ vai em 2 frames: [nome do canal (tópico)] [Envelope serializado].
-// O timestamp do envio da publicação está em Envelope.timestamp.
 message ChannelMessage {
   string channel  = 1;
   string username = 2;
   string text     = 3;
 }
 
-// =====================================================================
-// PARTE 3 - Relógios e heartbeat (servidor <-> serviço de referência)
-// O serviço de referência só conversa com servidores, nunca com bots.
-// =====================================================================
-
-// Servidor pede o seu rank informando o nome. Se o nome já estiver
-// cadastrado, a referência devolve o mesmo rank (sem repetir nomes).
-message RankRequest { string name = 1; }
 message RankReply {
   Status status = 1;
   int32  rank   = 2;
   string error  = 3;
 }
 
-// Servidor pede a lista de servidores disponíveis (nome e rank).
 message ServerInfo {
   string name = 1;
   int32  rank = 2;
@@ -131,46 +96,56 @@ message ServerInfo {
 message ListServersRequest {}
 message ListServersReply { repeated ServerInfo servers = 1; }
 
-// Heartbeat: "ainda estou funcionando". Na Parte 4 a sincronização do relógio deixou de
-// usar esta mensagem (passou para o coordenador eleito), por isso o campo 2 foi removido.
 message HeartbeatRequest { string name = 1; }
 message HeartbeatReply {
-  reserved 2;           // antigo reference_time (Parte 3)
-  Status status = 1;    // ERROR se o servidor não estiver cadastrado (ex.: foi removido)
+  reserved 2;
+  Status status = 1;
   string error  = 3;
 }
 
-// =====================================================================
-// PARTE 4 - Eleição (Bully) e sincronização de relógio (Berkeley)
-// Trocas entre SERVIDORES (REQ/REP direto na porta 5560 de cada servidor)
-// e anúncio do coordenador por Pub/Sub no tópico "servers".
-// =====================================================================
-
-// "relógio": o servidor pergunta a hora ao coordenador e já informa a sua.
 message ClockRequest {
   string name     = 1;
-  int64  clock_ms = 2;  // hora do relógio físico de quem pergunta (epoch em ms)
+  int64  clock_ms = 2;
 }
 
-// "hora correta": calculada pelo coordenador (média de Berkeley).
 message ClockReply {
-  Status status       = 1;  // ERROR se quem recebeu não é o coordenador
-  int64  correct_time = 2;  // epoch em ms
+  Status status       = 1;
+  int64  correct_time = 2;
   string error        = 3;
 }
 
-// "eleição": enviado a servidores de rank MAIOR. Quem responde OK assume a eleição.
 message ElectionRequest {
   string name = 1;
   int32  rank = 2;
 }
 message ElectionReply {
-  Status status = 1;  // OK = "estou vivo e assumo a eleição"
+  Status status = 1;
   string error  = 2;
 }
 
-// Publicado por quem foi eleito: [tópico "servers"] [Envelope com esta mensagem].
 message CoordinatorMessage {
-  string name = 1;  // nome do coordenador
-  int32  rank = 2;  // rank dele (permite a um servidor de rank maior contestar)
+  string name = 1;
+  int32 rank = 2;
 }
+
+// =====================================================================
+// REPLICAÇÃO DE CANAIS entre servidores
+// =====================================================================
+
+message ChannelInfo {
+  string name       = 1;
+  string created_by = 2;
+  int64  created_at = 3;  // epoch em ms
+}
+
+// Publicado no tópico replication quando um servidor cria um canal
+message ChannelReplicated {
+  string origin     = 1;  // servidor que criou (ele ignora o próprio eco)
+  string name       = 2;
+  string created_by = 3;
+  int64  created_at = 4;
+}
+
+// REQ direto entre servidores (porta 5560)
+message SyncChannelsRequest { string name = 1; }   // name = quem está pedindo
+message SyncChannelsReply { repeated ChannelInfo channels = 1; }

@@ -1,21 +1,3 @@
-"""
-cluster.py - Coordenador, eleição (algoritmo do Valentão / Bully) e sincronização de relógio.
-
-Lógica pura: não usa ZeroMQ nem protobuf. Toda comunicação com os outros servidores
-passa pelo objeto "link" (peer_link.py), que oferece:
-    list_servers()                       -> [(nome, rank), ...] ou None
-    ask_election(alvo, meu_rank)         -> True se o alvo respondeu OK
-    announce(nome, rank)                 -> publica no tópico "servers"
-    request_clock(alvo, minha_hora_ms)   -> None (sem resposta) ou (ok, hora_correta, enviado_ms, recebido_ms)
-Isso também permite testar a lógica com um "link" falso (ver tests/).
-
-Bully (resumo):
-  * o servidor de MAIOR rank vivo é o coordenador;
-  * quem quer eleição pede (REQ: eleição) aos servidores de rank maior que o seu;
-  * se algum responde OK, ele assume a eleição (repete o processo acima dele) e, no fim,
-    o de maior rank anuncia no tópico "servers";
-  * se ninguém de rank maior responde, este servidor se declara coordenador e anuncia.
-"""
 import time
 
 
@@ -24,19 +6,17 @@ class Cluster:
                  election_wait_s: float = 5.0, monotonic=time.monotonic) -> None:
         self.name = name
         self.rank = rank
-        self.physical = physical     # relógio físico ajustável (bbsutil.PhysicalClock)
-        self.berkeley = berkeley     # cálculo da hora correta (usado quando este servidor é o coordenador)
+        self.physical = physical
+        self.berkeley = berkeley
         self.link = link
         self.logger = logger
-        self.election_wait_s = election_wait_s   # quanto esperar o anúncio depois de um OK
-        self.monotonic = monotonic               # injetável para testes
+        self.election_wait_s = election_wait_s
+        self.monotonic = monotonic
 
-        # Variável exigida pela especificação: nome do servidor eleito coordenador.
-        # None = ainda desconhecido (sem eleição concluída).
         self.coordinator = None
 
-        self.pending_election = False   # recebemos um pedido de eleição e devemos assumi-la
-        self.retry_at = 0.0             # quando repetir a eleição se nenhum anúncio chegar
+        self.pending_election = False
+        self.retry_at = 0.0          
 
     def is_coordinator(self) -> bool:
         return self.coordinator == self.name
@@ -52,7 +32,6 @@ class Cluster:
             return
 
         self.coordinator = None
-        # Só servidores de rank MAIOR participam; os mais altos primeiro (mais prováveis de serem o coordenador).
         higher = sorted(((rank, name) for name, rank in servers if rank > self.rank), reverse=True)
         self.logger.note(f"eleição iniciada (meu rank={self.rank}) | servidores de rank maior: "
                          f"{[name for _, name in higher] or 'nenhum'}")
@@ -63,7 +42,7 @@ class Cluster:
                 self.retry_at = self.monotonic() + self.election_wait_s
                 return
 
-        self.become_coordinator()   # ninguém de rank maior respondeu
+        self.become_coordinator()
 
     def become_coordinator(self) -> None:
         self.berkeley.reset()
@@ -72,39 +51,31 @@ class Cluster:
         self.logger.note(f"fui eleito coordenador (rank {self.rank})")
 
     def on_election_request(self, name: str, rank: int) -> bool:
-        """
-        Recebido (REQ: eleição). Responde OK se quem pediu tem rank MENOR que o meu;
-        depois da resposta, o servidor deve assumir a eleição (ver run_pending_election).
-        """
         if rank < self.rank:
             self.pending_election = True
             return True
         return False
 
     def run_pending_election(self) -> None:
-        """Chamar depois de enviar o "OK": agora este servidor assume a eleição."""
         if self.pending_election:
             self.pending_election = False
             self.start_election()
 
     def on_announcement(self, name: str, rank: int) -> None:
-        """Recebido no tópico "servers": alguém se declarou coordenador."""
         if name == self.name:
-            return   # eco do meu próprio anúncio
+            return
         if rank < self.rank:
-            # Um servidor de rank menor se declarou coordenador, mas eu tenho rank maior: contesto.
             self.logger.note(f"'{name}' (rank {rank}) se anunciou coordenador, mas meu rank ({self.rank}) "
                              f"é maior: assumindo a eleição")
             self.start_election()
             return
         if self.is_coordinator():
-            self.berkeley.reset()   # deixei de ser o coordenador
+            self.berkeley.reset()
         if self.coordinator != name:
             self.logger.note(f"novo coordenador: '{name}' (rank {rank})")
         self.coordinator = name
 
     def maintain(self) -> None:
-        """Chamar a cada volta do laço principal: sem coordenador conhecido, tenta eleger."""
         if self.coordinator is None and self.monotonic() >= self.retry_at:
             self.start_election()
 
@@ -136,10 +107,6 @@ class Cluster:
                          f"ajuste={adjustment:+d} ms (rtt={rtt} ms)")
 
     def handle_clock_request(self, name: str, reported_ms: int):
-        """
-        Coordenador: recebe (REQ: relógio) e devolve a hora correta (média de Berkeley).
-        Devolve None se este servidor não é o coordenador. O próprio coordenador também se ajusta à média.
-        """
         if not self.is_coordinator():
             return None
         now = self.physical.now_ms()
